@@ -811,7 +811,7 @@ int main(int argc, char *argv[])
 			{
 				counter++;
 				task_free(t);
-				continue;
+				//continue;
 			}
 	    }
 	  }
@@ -833,11 +833,11 @@ int main(int argc, char *argv[])
             error("Error forking for upload.\n");
 			continue;
         }
-	else //pid > 0
-	  continue;
+		else{ //pid > 0
+			task_free(t);
+			continue;
+		}
     }
 
 return 0;
 }
-
-
