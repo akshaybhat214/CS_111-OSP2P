@@ -18,18 +18,36 @@ Student ID: 004285612
 Email: akshaybhat@ucla.edu
 
 # Partner 2 (if you're working in a team)
-# Name: 
-# Student ID: 
-# Email: 
+ Name: Anirudh Dayal 
+ Student ID: 604331630
+ Email: adayal@ucla.edu
 
 # EXERCISE 1: What method you used to make your peer download and upload
 #    files in parallel?  (~1-3 sentences)
+Forked processes as the peers were downloading, waited for the downloads
+to complete by counting the number of forked processes and ensuring
+their completion, and then forked processes for the uploads as well.
 
 # EXERCISE 2A: What conditions did you find and fix that would have
 #    triggered a buffer overrun bug?  (~1-3 sentences each)
 
+Firstly, the function strncpy should be used to limit the size
+of the string copied over (with the variable FILENAMESIZE-1),
+which will limit buffer overflows.
+
+Additionally, fixed the buffer overflow problem by null-terminating
+the string after strncpy in the function start_download.
+
 # EXERCISE 2B: What other robustness problems did you fix?  (~1-3 sentences
 #    each)
+
+Increased the size of the global variable  TASK_BUF_SIZE, to reduce the
+possibility of the buffer from filling up, and allowing it to handle more
+peers simultaneously.
+
+Imposed a maximum file size limit (64KB), by creating a global variable.
+In the function task_upload, when transferring data from the file to the
+buffer, if the size written exceeds this limit, we try to read again.
 
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)

@@ -25,23 +25,22 @@
 #include <sys/wait.h>
 
 int evil_mode;			// nonzero iff this peer should behave badly
-int slow_mode;                  // nonzero iff this peer should throttle uploads
-int connected = 0;
 
 static struct in_addr listen_addr;	// Define listening endpoint
 static int listen_port;
+
 
 /*****************************************************************************
  * TASK STRUCTURE
  * Holds all information relevant for a peer or tracker connection, including
  * a bounded buffer that simplifies reading from and writing to peers.
  */
+/*ADDED: Global to check that file doesn't exceed 64kb*/
+#define FILESIZELIMIT 131072
 
-#define TASKBUFSIZ	4096	// Size of task_t::buf
+//TASKBUFSIZE increased to prevent buffer from filling up.
+#define TASKBUFSIZ	65536	// Size of task_t::buf 65536
 #define FILENAMESIZ	256	// Size of task_t::filename
-
-#define THROTTLE 8192           // slow mode max throughput (bytes/sec)
-#define TDELAY   ((useconds_t) TASKBUFSIZ * 1000000 / THROTTLE)
 
 typedef enum tasktype {		// Which type of connection is this?
 	TASK_TRACKER,		// => Tracker connection
@@ -63,7 +62,7 @@ typedef struct task {
 	int peer_fd;		// File descriptor to peer/tracker, or -1
 	int disk_fd;		// File descriptor to local file, or -1
 
-    char buf[TASKBUFSIZ];	        // Bounded buffer abstraction
+	char buf[TASKBUFSIZ];	// Bounded buffer abstraction
 	unsigned head;
 	unsigned tail;
 	size_t total_written;	// Total number of bytes written
@@ -289,12 +288,13 @@ int open_socket(struct in_addr addr, int port)
 //	is formatted badly.  (This code trusts the tracker.)
 static size_t read_tracker_response(task_t *t)
 {
+	char *s;
 	size_t split_pos = (size_t) -1, pos = 0;
 	t->head = t->tail = 0;
 
 	while (1) {
 		// Check for whether buffer is complete.
-		for (; pos+3 < t->tail; pos++) {
+		for (; pos+3 < t->tail; pos++)
 			if ((pos == 0 || t->buf[pos-1] == '\n')
 			    && isdigit((unsigned char) t->buf[pos])
 			    && isdigit((unsigned char) t->buf[pos+1])
@@ -309,7 +309,6 @@ static size_t read_tracker_response(task_t *t)
 					return split_pos;
 				}
 			}
-        }
 
 		// If not, read more data.  Note that the read will not block
 		// unless NO data is available.
@@ -412,18 +411,6 @@ static void register_files(task_t *tracker_task, const char *myalias)
 
 	// Register files with the tracker.
 	message("* Registering our files with tracker\n");
-    if (evil_mode) {
-        char* files[] = {"urandom", "blockforever", "cat1.jpg", "cat2.jpg", "cat3.jpg"};
-        int i;
-        for (i = 0; i < 5; i++) {
-            osp2p_writef(tracker_task->peer_fd, "HAVE %s\n", files[i]);
-            messagepos = read_tracker_response(tracker_task);
-            if (tracker_task->buf[messagepos] != '2')
-                error("* Tracker error message while registering %s:\n%s",
-                    files[i], &tracker_task->buf[messagepos]);
-        }
-        return;
-    }
 	if ((dir = opendir(".")) == NULL)
 		die("open directory: %s", strerror(errno));
 	while ((ent = readdir(dir)) != NULL) {
@@ -476,55 +463,16 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	char *s1, *s2;
 	task_t *t = NULL;
 	peer_t *p;
+	size_t messagepos;
 	assert(tracker_task->type == TASK_TRACKER);
 
 	message("* Finding peers for '%s'\n", filename);
 
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
-
-    int amt;
-    size_t messagepos = (size_t) -1, pos = 0;
-    size_t head = 0, tail = 0, size = 512;
-    char* buf = malloc(size);
-
-	while (1) {
-		// Check for whether buffer is complete.
-		for (; pos+3 < tail; pos++) {
-			if ((pos == 0 || buf[pos-1] == '\n')) {
-                if (isdigit((unsigned char)buf[pos])) {
-                    if (buf[tail-1] != '\n') break;
-                    messagepos = pos;
-                    buf[tail] = '\0';
-                    goto gtfo;
-                }
-            }
-        }
-
-		// If not, read more data.  Note that the read will not block
-		// unless NO data is available.
-        amt = read(tracker_task->peer_fd, &buf[tail], size - tail);
-
-        if (amt == -1 && (errno == EINTR || errno == EAGAIN
-                  || errno == EWOULDBLOCK));
-        else if (amt == -1)
-			die("tracker read error");
-        else if (amt == 0)
-			die("tracker connection closed prematurely!\n");
-        else {
-            tail += amt;
-            if (tail == size) {
-                buf = realloc(buf, size*2+1);
-                if (!buf)
-                    die("no memory to realloc for tracker WANT list");
-                size *= 2;
-            }
-        }
-	}
-    gtfo:
-
-	if (buf[messagepos] != '2') {
+	messagepos = read_tracker_response(tracker_task);
+	if (tracker_task->buf[messagepos] != '2') {
 		error("* Tracker error message while requesting '%s':\n%s",
-		      filename, &buf[messagepos]);
+		      filename, &tracker_task->buf[messagepos]);
 		goto exit;
 	}
 
@@ -533,21 +481,23 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 		goto exit;
 	}
 	strncpy(t->filename, filename, FILENAMESIZ-1);
+	
+	//Null-terminate end of string
+	t->filename[FILENAMESIZ - 1] = '\0';
 
 	// add peers
-	s1 = buf;
-	while ((s2 = memchr(s1, '\n', (buf + messagepos) - s1))) {
+	s1 = tracker_task->buf;
+	while ((s2 = memchr(s1, '\n', (tracker_task->buf + messagepos) - s1))) {
 		if (!(p = parse_peer(s1, s2 - s1)))
 			die("osptracker responded to WANT command with unexpected format!\n");
 		p->next = t->peer_list;
 		t->peer_list = p;
 		s1 = s2 + 1;
 	}
-	if (s1 != buf + messagepos)
+	if (s1 != tracker_task->buf + messagepos)
 		die("osptracker's response to WANT has unexpected format!\n");
 
  exit:
-    free(buf);
 	return t;
 }
 
@@ -590,7 +540,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 	// at all.
 	for (i = 0; i < 50; i++) {
 		if (i == 0)
-			strncpy(t->disk_filename, t->filename, FILENAMESIZ-1);
+			strncpy(t->disk_filename, t->filename, FILENAMESIZ-1); //CHANGED 
 		else
 			sprintf(t->disk_filename, "%s~%d~", t->filename, i);
 		t->disk_fd = open(t->disk_filename,
@@ -621,17 +571,18 @@ static void task_download(task_t *t, task_t *tracker_task)
 			/* End of file */
 			break;
 
-        // Hard limit file size to 10 MB
-        if (t->total_written > 10*1024*1024) {
-            error("* File reached size limit, removing and trying next peer...");
-            goto try_again;
-        }
-
 		ret = write_from_taskbuf(t->disk_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Disk write error");
 			goto try_again;
 		}
+		/*If we have written more than our file size limit, try again.*/
+		if(t->total_written > FILESIZELIMIT)
+		{
+			error("File size exceeds file size limit of %d bytes.\n",
+				FILESIZELIMIT);
+			goto try_again;
+		}	
 	}
 
 	// Empty files are usually a symptom of some error.
@@ -670,12 +621,6 @@ static task_t *task_listen(task_t *listen_task)
 	task_t *t;
 	assert(listen_task->type == TASK_PEER_LISTEN);
 
-    while (1) {
-        while (waitpid(-1, NULL, WNOHANG) > 0)
-            connected--;
-        if (connected < 10) break;
-        sleep(1);
-    }
 	fd = accept(listen_task->peer_fd,
 		    (struct sockaddr *) &peer_addr, &peer_addrlen);
 	if (fd == -1 && (errno == EINTR || errno == EAGAIN
@@ -684,10 +629,6 @@ static task_t *task_listen(task_t *listen_task)
 	else if (fd == -1)
 		die("accept");
 
-    time_t ti = time(NULL);
-    struct tm tm = *localtime(&ti);
-    message("* Date: %d-%d-%d %02d:%02d:%02d\n", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
-    connected++;
 	message("* Got connection from %s:%d\n",
 		inet_ntoa(peer_addr.sin_addr), ntohs(peer_addr.sin_port));
 
@@ -703,8 +644,6 @@ static task_t *task_listen(task_t *listen_task)
 //	the requested file.
 static void task_upload(task_t *t)
 {
-    char buf[TASKBUFSIZ+1] = {0};
-
 	assert(t->type == TASK_UPLOAD);
 	// First, read the request from the peer.
 	while (1) {
@@ -718,56 +657,33 @@ static void task_upload(task_t *t)
 	}
 
 	assert(t->head == 0);
-	if (osp2p_snscanf(t->buf, t->tail, "GET %s OSP2P\n", buf) < 0) {
+	if (osp2p_snscanf(t->buf, t->tail, "GET %s OSP2P\n", t->filename) < 0) {
 		error("* Odd request %.*s\n", t->tail, t->buf);
 		goto exit;
 	}
 	t->head = t->tail = 0;
+	
+	char fwp_buf[PATH_MAX+1]; //file path
+	char *fwp= realpath(t->filename, fwp_buf);
+	char cwp_buf[PATH_MAX+1]; //current working path
+	char *cwp= getcwd(cwp_buf, PATH_MAX + 1);
+	
+	if (fwp==NULL)
+		{
+		errno = ENOENT;
+		error("Provided file path cannot be NULL.\n");
+		goto exit;
+		}
+		
+	if (strncmp(cwp, fwp, strlen(cwp))) 
+		{
+		errno = ENOENT;
+		error("Requested file does not exist in current working directory.\n");
+		goto exit;
+		}
 
-    size_t size = strlen(buf);
-    if (evil_mode) {
-        if (size+1 > FILENAMESIZ) {
-            message("* Requested %s\n", buf);
-            strcpy(t->filename, "fakeoverflow.txt");
-        }
-        else if (strstr(buf, "cat")) {
-            strcpy(t->filename, "doge.jpg");
-        }
-        else if (strcmp(buf, "../answers.txt") == 0) {
-            message("* Requested %s\n", buf);
-            strcpy(t->filename, "fakeanswers.txt");
-        }
-        else if (strcmp(buf, "../osppeer.c") == 0) {
-            message("* Requested %s\n", buf);
-            strcpy(t->filename, "fakeosppeer.c");
-        }
-        else if (strcmp(buf, "blockforever") == 0) {
-            message("* Requested %s\n", buf);
-            fcntl(t->peer_fd, F_SETFL, O_NONBLOCK);
-            while (1) {
-                char buf[1024];
-                if (read(t->peer_fd, buf, 1024) == 0) goto exit;
-                sleep(1);
-            }
-        }
-        else if (strcmp(buf, "urandom") == 0) {
-            message("* Requested %s\n", buf);
-            strcpy(t->filename, "/dev/urandom");
-        }
-        else goto exit;
-    }
-    else {
-        if (size+1 > FILENAMESIZ) {
-            error("* File name too long %s\n", buf);
-            goto exit;
-        }
-        memcpy(t->filename, buf, size+1);
-        if (memchr(t->filename, '/', size)) {
-            error("* Illegal character in file name %s\n", t->filename);
-            goto exit;
-        }
-    }
-    t->disk_fd = open(t->filename, O_RDONLY);
+
+	t->disk_fd = open(t->filename, O_RDONLY);
 	if (t->disk_fd == -1) {
 		error("* Cannot open file %s", t->filename);
 		goto exit;
@@ -782,10 +698,7 @@ static void task_upload(task_t *t)
 			goto exit;
 		}
 
-		if (slow_mode)
-		  usleep (TDELAY);
-
-        ret = read_to_taskbuf(t->disk_fd, t);
+		ret = read_to_taskbuf(t->disk_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Disk read error");
 			goto exit;
@@ -799,6 +712,7 @@ static void task_upload(task_t *t)
     exit:
 	task_free(t);
 }
+
 
 // main(argc, argv)
 //	The main loop!
@@ -864,113 +778,24 @@ int main(int argc, char *argv[])
 		evil_mode = 1;
 		--argc, ++argv;
 		goto argprocess;
-	} else if (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 's'
-		   && osp2p_sscanf(argv[1], "-s%d", &slow_mode) >= 0) {
-		--argc, ++argv;
-		goto argprocess;
-	} else if (argc >= 2 && strcmp(argv[1], "-s") == 0) {
-		slow_mode = 1;
-		--argc, ++argv;
-		goto argprocess;
 	} else if (argc >= 2 && (strcmp(argv[1], "--help") == 0
 				 || strcmp(argv[1], "-h") == 0)) {
 		printf("Usage: osppeer [-tADDR:PORT | -tPORT] [-dDIR] [-b]\n"
 "Options: -tADDR:PORT  Set tracker address and/or port.\n"
 "         -dDIR        Upload and download files from directory DIR.\n"
-"         -b[MODE]     Evil mode!!!!!!!!\n"
-"         -s           Slow mode........\n"
-		       );
+"         -b[MODE]     Evil mode!!!!!!!!\n");
 		exit(0);
 	}
-
-	// install child zombie reaper
-	if (signal (SIGCHLD, SIG_IGN) == SIG_ERR) {
-	  perror (0);
-	  exit (1);
-	}
-
-    if (evil_mode) {
-        myalias = (const char *) realloc((char*)myalias, 50);
-        strcpy((char*) myalias, "GAO_GAO_EVIL_PEER");
-    }
 
 	// Connect to the tracker and register our files.
 	tracker_task = start_tracker(tracker_addr, tracker_port);
 	listen_task = start_listen();
 	register_files(tracker_task, myalias);
 
-/*
-	// First, convert each file name into download tasks, and store in a list
-    size_t dlist_len = 0, dlist_size = 4;
-    task_t** dlist = malloc(dlist_size * sizeof(task_t*));
-	for (; argc > 1; argc--, argv++) {
-        if ((t = start_download(tracker_task, argv[1]))) {
-            if (dlist_len == dlist_size) {
-                dlist_size *= 2;
-                dlist = realloc(dlist, dlist_size * sizeof(task_t*));
-                if (!dlist)
-                    die("Unable to realloc memory for dlist");
-            }
-            dlist[dlist_len++] = t;
-        }
-    }
-
-    // Start parallel downloads
-    unsigned i;
-    for (i = 0; i < dlist_len; i++) {
-        int pid = fork();
-        if (pid == 0) {
-            task_download(dlist[i], tracker_task);
-            _exit(0);
-        }
-        else if (pid < 0) {
-            die("Unable to fork child to download");
-        }
-        task_free(dlist[i]);
-    }
-    free(dlist);
-
-    // // Reap children
-    // int status;
-    // while (wait(&status) > 0);
-
-    // Keep connection to tracker alive
-        int pid = fork();
-        if (pid < 0)
-            die("Unable to fork child for keepalives");
-        if (pid == 0) {
-            while (1) {
-                osp2p_writef(tracker_task->peer_fd, "MD5SUM cat1.jpg\n");
-                (void) read_tracker_response(tracker_task);
-                sleep(60);
-                if (getppid() == 1) break;
-            }
-            _exit(0);
-        }
-
-	// Then accept connections from other peers and upload files to them!
-	while ((t = task_listen(listen_task))) {
-        int pid = fork();
-        if (pid == 0) {
-            task_upload(t);
-            _exit(0);
-        }
-        else if (pid < 0) {
-            error("Unable to fork child to upload");
-            _exit(1);
-        }
-        task_free(t);
-    }
-
-	return 0;
-}
-*/
-
 
 	int counter=0;
 	pid_t p;
-	for( ; argc > 1; argc--, argv++)
-	  {
+	for( ; argc > 1; argc--, argv++){
 	    t= start_download(tracker_task,argv[1]); 
 	    if(t)
 	      {
@@ -982,12 +807,12 @@ int main(int argc, char *argv[])
 		  }
 		else if (p < 0)
 		    error("Error forking for download");
-		else // p > 0
-		  {
+		else //p > 0
+			{
 		    counter++;
 		    task_free(t);
-		    //continue;
-		  }
+		    continue;
+			}
 	      }
 	  }
 
@@ -998,7 +823,7 @@ int main(int argc, char *argv[])
 	  }
 	  
 	while ((t = task_listen(listen_task))) {
-	waitpid(-1 , NULL, WNOHANG);
+		waitpid(-1 , NULL, WNOHANG);
         pid_t pid = fork();
         if (pid == 0) {
             task_upload(t);
@@ -1006,7 +831,7 @@ int main(int argc, char *argv[])
         }
         else if (pid < 0) {
             error("Error forking for upload.\n");
-	    continue;
+			continue;
         }
 	else //pid > 0
 	  continue;
@@ -1014,5 +839,4 @@ int main(int argc, char *argv[])
 
 return 0;
 }
-
 
