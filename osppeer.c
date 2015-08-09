@@ -808,15 +808,15 @@ int main(int argc, char *argv[])
 		else if (p < 0)
 		    error("Error forking for download");
 		else //p > 0
-			{
-				counter++;
-				task_free(t);
-				//continue;
-			}
+		  {
+		    counter++;
+		    task_free(t);
+		    continue;
+		  }
 	    }
 	  }
 
-	while(counter > 0)
+	while(counter > 0)//Wait for downloads to complete.
 	  {
 	    waitpid(-1,NULL,0);
 	    counter--;
