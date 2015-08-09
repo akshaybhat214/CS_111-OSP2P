@@ -798,7 +798,7 @@ int main(int argc, char *argv[])
 	for( ; argc > 1; argc--, argv++){
 	    t= start_download(tracker_task,argv[1]); 
 	    if(t)
-	      {
+	    {
 		p = fork();
 		if (p==0)//child process
 		  {
@@ -809,11 +809,11 @@ int main(int argc, char *argv[])
 		    error("Error forking for download");
 		else //p > 0
 			{
-		    counter++;
-		    task_free(t);
-		    continue;
+				counter++;
+				task_free(t);
+				continue;
 			}
-	      }
+	    }
 	  }
 
 	while(counter > 0)
@@ -839,4 +839,5 @@ int main(int argc, char *argv[])
 
 return 0;
 }
+
 

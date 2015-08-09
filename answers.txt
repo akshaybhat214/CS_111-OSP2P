@@ -45,9 +45,15 @@ Increased the size of the global variable  TASK_BUF_SIZE, to reduce the
 possibility of the buffer from filling up, and allowing it to handle more
 peers simultaneously.
 
-Imposed a maximum file size limit (64KB), by creating a global variable.
+Imposed a maximum file size limit (124KB), by creating a global variable.
 In the function task_upload, when transferring data from the file to the
 buffer, if the size written exceeds this limit, we try to read again.
+
+Created a check to ensure that the file handled by the peer could not be 
+outside the current working directory. This prevents malicious requests.
+
+Also created a check to prevent a null file path provided as input to a
+peer.
 
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)
